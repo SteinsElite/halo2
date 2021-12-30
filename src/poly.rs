@@ -182,6 +182,7 @@ impl<F: Field> Polynomial<Assigned<F>, LagrangeCoeff> {
 }
 
 impl<F: Field> Polynomial<F, ExtendedLagrangeCoeff> {
+    // TODO: should we remove this?
     /// Maps every coefficient `c` in `p` to `1 - c`.
     pub fn one_minus(mut p: Self) -> Self {
         parallelize(&mut p.values, |p, _start| {

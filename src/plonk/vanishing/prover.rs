@@ -1,3 +1,4 @@
+use std::hash::Hash;
 use std::iter;
 
 use ff::Field;
@@ -8,6 +9,7 @@ use crate::{
     arithmetic::{eval_polynomial, CurveAffine, FieldExt},
     plonk::{ChallengeX, ChallengeY, Error},
     poly::{
+        self,
         commitment::{Blind, Params},
         multiopen::ProverQuery,
         Coeff, EvaluationDomain, ExtendedLagrangeCoeff, Polynomial,
@@ -58,16 +60,25 @@ impl<C: CurveAffine> Argument<C> {
 }
 
 impl<C: CurveAffine> Committed<C> {
-    pub(in crate::plonk) fn construct<E: EncodedChallenge<C>, T: TranscriptWrite<C, E>>(
+    pub(in crate::plonk) fn construct<
+        E: EncodedChallenge<C>,
+        T: TranscriptWrite<C, E>,
+        Ev: Clone,
+        Id: Copy + Eq + Hash,
+    >(
         self,
         params: &Params<C>,
         domain: &EvaluationDomain<C::Scalar>,
-        expressions: impl Iterator<Item = Polynomial<C::Scalar, ExtendedLagrangeCoeff>>,
+        expressions: impl Iterator<Item = poly::Ast<Ev, Id, C::Scalar, ExtendedLagrangeCoeff>>,
         y: ChallengeY<C>,
         transcript: &mut T,
+        evaluator: poly::Evaluator<Ev, Id, C::Scalar, ExtendedLagrangeCoeff>,
     ) -> Result<Constructed<C>, Error> {
         // Evaluate the h(X) polynomial's constraint system expressions for the constraints provided
-        let h_poly = expressions.fold(domain.empty_extended(), |h_poly, v| h_poly * *y + &v);
+        let h_poly = expressions
+            .reduce(|h_poly, v| &(&h_poly * *y) + &v) // Fold the gates together with the y challenge
+            .unwrap_or(poly::Ast::ConstantTerm(C::Scalar::zero()));
+        let h_poly = evaluator.evaluate(&h_poly, domain); // Evaluate the h(X) polynomial
 
         // Divide by t(X) = X^{params.n} - 1.
         let h_poly = domain.divide_by_vanishing_poly(h_poly);
