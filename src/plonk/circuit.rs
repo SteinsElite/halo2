@@ -761,6 +761,125 @@ impl<F: Field> Expression<F> {
         }
     }
 
+    /// Evaluate the polynomial using the provided closures to perform the
+    /// operations, passing through the provided mutable context.
+    pub(crate) fn evaluate_with<T, Ctx>(
+        &self,
+        context: &mut Ctx,
+        constant: &impl Fn(&mut Ctx, F) -> T,
+        selector_column: &impl Fn(&mut Ctx, Selector) -> T,
+        fixed_column: &impl Fn(&mut Ctx, usize, usize, Rotation) -> T,
+        advice_column: &impl Fn(&mut Ctx, usize, usize, Rotation) -> T,
+        instance_column: &impl Fn(&mut Ctx, usize, usize, Rotation) -> T,
+        negated: &impl Fn(&mut Ctx, T) -> T,
+        sum: &impl Fn(&mut Ctx, T, T) -> T,
+        product: &impl Fn(&mut Ctx, T, T) -> T,
+        scaled: &impl Fn(&mut Ctx, T, F) -> T,
+    ) -> T {
+        match self {
+            Expression::Constant(scalar) => constant(context, *scalar),
+            Expression::Selector(selector) => selector_column(context, *selector),
+            Expression::Fixed {
+                query_index,
+                column_index,
+                rotation,
+            } => fixed_column(context, *query_index, *column_index, *rotation),
+            Expression::Advice {
+                query_index,
+                column_index,
+                rotation,
+            } => advice_column(context, *query_index, *column_index, *rotation),
+            Expression::Instance {
+                query_index,
+                column_index,
+                rotation,
+            } => instance_column(context, *query_index, *column_index, *rotation),
+            Expression::Negated(a) => {
+                let a = a.evaluate_with(
+                    context,
+                    constant,
+                    selector_column,
+                    fixed_column,
+                    advice_column,
+                    instance_column,
+                    negated,
+                    sum,
+                    product,
+                    scaled,
+                );
+                negated(context, a)
+            }
+            Expression::Sum(a, b) => {
+                let a = a.evaluate_with(
+                    context,
+                    constant,
+                    selector_column,
+                    fixed_column,
+                    advice_column,
+                    instance_column,
+                    negated,
+                    sum,
+                    product,
+                    scaled,
+                );
+                let b = b.evaluate_with(
+                    context,
+                    constant,
+                    selector_column,
+                    fixed_column,
+                    advice_column,
+                    instance_column,
+                    negated,
+                    sum,
+                    product,
+                    scaled,
+                );
+                sum(context, a, b)
+            }
+            Expression::Product(a, b) => {
+                let a = a.evaluate_with(
+                    context,
+                    constant,
+                    selector_column,
+                    fixed_column,
+                    advice_column,
+                    instance_column,
+                    negated,
+                    sum,
+                    product,
+                    scaled,
+                );
+                let b = b.evaluate_with(
+                    context,
+                    constant,
+                    selector_column,
+                    fixed_column,
+                    advice_column,
+                    instance_column,
+                    negated,
+                    sum,
+                    product,
+                    scaled,
+                );
+                product(context, a, b)
+            }
+            Expression::Scaled(a, f) => {
+                let a = a.evaluate_with(
+                    context,
+                    constant,
+                    selector_column,
+                    fixed_column,
+                    advice_column,
+                    instance_column,
+                    negated,
+                    sum,
+                    product,
+                    scaled,
+                );
+                scaled(context, a, *f)
+            }
+        }
+    }
     /// Compute the degree of this polynomial
     pub fn degree(&self) -> usize {
         match self {
