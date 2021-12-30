@@ -6,6 +6,7 @@ use super::Argument;
 use crate::{
     arithmetic::{eval_polynomial, parallelize, CurveAffine, FieldExt},
     poly::{
+        self,
         commitment::{Blind, Params},
         multiopen::ProverQuery,
         Coeff, EvaluationDomain, ExtendedLagrangeCoeff, LagrangeCoeff, Polynomial, Rotation,
@@ -94,38 +95,39 @@ impl<F: FieldExt> Argument<F> {
     {
         // Closure to get values of expressions and compress them
         let compress_expressions = |expressions: &[Expression<C::Scalar>]| {
+            let mut evaluator_lagrange = poly::new_evaluator(|| {});
+            let mut evaluator_extended = poly::new_evaluator(|| {});
+
             // Values of input expressions involved in the lookup
             let unpermuted_expressions: Vec<_> = expressions
                 .iter()
                 .map(|expression| {
-                    expression.evaluate(
-                        &|scalar| pk.vk.domain.constant_lagrange(scalar),
-                        &|_| panic!("virtual selectors are removed during optimization"),
-                        &|_, column_index, rotation| {
-                            fixed_values[column_index].clone().rotate(rotation)
+                    expression.evaluate_with(
+                        &mut evaluator_lagrange,
+                        &|_, scalar| poly::Ast::ConstantTerm(scalar),
+                        &|_, _| panic!("virtual selectors are removed during optimization"),
+                        &|evaluator, _, column_index, rotation| {
+                            evaluator
+                                .register_poly(fixed_values[column_index].clone())
+                                .with_rotation(rotation)
+                                .into()
                         },
-                        &|_, column_index, rotation| {
-                            advice_values[column_index].clone().rotate(rotation)
+                        &|evaluator, _, column_index, rotation| {
+                            evaluator
+                                .register_poly(advice_values[column_index].clone())
+                                .with_rotation(rotation)
+                                .into()
                         },
-                        &|_, column_index, rotation| {
-                            instance_values[column_index].clone().rotate(rotation)
+                        &|evaluator, _, column_index, rotation| {
+                            evaluator
+                                .register_poly(instance_values[column_index].clone())
+                                .with_rotation(rotation)
+                                .into()
                         },
-                        &|a| -a,
-                        &|a, b| a + &b,
-                        &|a, b| {
-                            let mut modified_a = vec![C::Scalar::one(); params.n as usize];
-                            parallelize(&mut modified_a, |modified_a, start| {
-                                for ((modified_a, a), b) in modified_a
-                                    .iter_mut()
-                                    .zip(a[start..].iter())
-                                    .zip(b[start..].iter())
-                                {
-                                    *modified_a *= *a * b;
-                                }
-                            });
-                            pk.vk.domain.lagrange_from_vec(modified_a)
-                        },
-                        &|a, scalar| a * scalar,
+                        &|_, a| -a,
+                        &|_, a, b| a + b,
+                        &|_, a, b| a * b,
+                        &|_, a, scalar| a * scalar,
                     )
                 })
                 .collect();
@@ -133,43 +135,52 @@ impl<F: FieldExt> Argument<F> {
             let unpermuted_cosets: Vec<_> = expressions
                 .iter()
                 .map(|expression| {
-                    expression.evaluate(
-                        &|scalar| pk.vk.domain.constant_extended(scalar),
-                        &|_| panic!("virtual selectors are removed during optimization"),
-                        &|_, column_index, rotation| {
-                            pk.vk
-                                .domain
-                                .rotate_extended(&fixed_cosets[column_index], rotation)
+                    expression.evaluate_with(
+                        &mut evaluator_extended,
+                        &|_, scalar| poly::Ast::ConstantTerm(scalar),
+                        &|_, _| panic!("virtual selectors are removed during optimization"),
+                        &|evaluator, _, column_index, rotation| {
+                            evaluator
+                                .register_poly(fixed_cosets[column_index].clone())
+                                .with_rotation(rotation)
+                                .into()
                         },
-                        &|_, column_index, rotation| {
-                            pk.vk
-                                .domain
-                                .rotate_extended(&advice_cosets[column_index], rotation)
+                        &|evaluator, _, column_index, rotation| {
+                            evaluator
+                                .register_poly(advice_cosets[column_index].clone())
+                                .with_rotation(rotation)
+                                .into()
                         },
-                        &|_, column_index, rotation| {
-                            pk.vk
-                                .domain
-                                .rotate_extended(&instance_cosets[column_index], rotation)
+                        &|evaluator, _, column_index, rotation| {
+                            evaluator
+                                .register_poly(instance_cosets[column_index].clone())
+                                .with_rotation(rotation)
+                                .into()
                         },
-                        &|a| -a,
-                        &|a, b| a + &b,
-                        &|a, b| a * &b,
-                        &|a, scalar| a * scalar,
+                        &|_, a| -a,
+                        &|_, a, b| a + b,
+                        &|_, a, b| a * b,
+                        &|_, a, scalar| a * scalar,
                     )
                 })
                 .collect();
 
             // Compressed version of expressions
-            let compressed_expression = unpermuted_expressions
-                .iter()
-                .fold(domain.empty_lagrange(), |acc, expression| {
-                    acc * *theta + expression
-                });
+            let compressed_expression = unpermuted_expressions.iter().fold(
+                poly::Ast::ConstantTerm(C::Scalar::zero()),
+                |acc, expression| &(acc * *theta) + expression,
+            );
 
             (
-                unpermuted_expressions,
-                unpermuted_cosets,
-                compressed_expression,
+                unpermuted_expressions
+                    .iter()
+                    .map(|ast| evaluator_lagrange.evaluate(ast, domain))
+                    .collect(),
+                unpermuted_cosets
+                    .iter()
+                    .map(|ast| evaluator_extended.evaluate(ast, domain))
+                    .collect(),
+                evaluator_lagrange.evaluate(&compressed_expression, domain),
             )
         };
 

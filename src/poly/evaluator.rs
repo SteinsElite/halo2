@@ -9,6 +9,7 @@ use pasta_curves::arithmetic::FieldExt;
 use super::{
     Basis, Coeff, EvaluationDomain, ExtendedLagrangeCoeff, LagrangeCoeff, Polynomial, Rotation,
 };
+use crate::arithmetic::parallelize;
 
 /// A reference to a polynomial registered with an [`Evaluator`].
 #[derive(Clone)]
@@ -303,7 +304,22 @@ impl BasisOps for LagrangeCoeff {
         a: Polynomial<F, Self>,
         b: Polynomial<F, Self>,
     ) -> Polynomial<F, Self> {
-        todo!()
+        let mut modified_a: Vec<_> = domain
+            .empty_lagrange()
+            .values
+            .into_iter()
+            .map(|_| F::one())
+            .collect();
+        parallelize(&mut modified_a, |modified_a, start| {
+            for ((modified_a, a), b) in modified_a
+                .iter_mut()
+                .zip(a[start..].iter())
+                .zip(b[start..].iter())
+            {
+                *modified_a *= *a * b;
+            }
+        });
+        domain.lagrange_from_vec(modified_a)
     }
 }
 
