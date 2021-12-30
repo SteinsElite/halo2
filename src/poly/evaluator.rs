@@ -1,4 +1,6 @@
 use std::{
+    collections::HashMap,
+    hash::Hash,
     marker::PhantomData,
     ops::{Add, Mul, Neg, Sub},
 };
@@ -13,19 +15,19 @@ use crate::arithmetic::parallelize;
 
 /// A reference to a polynomial registered with an [`Evaluator`].
 #[derive(Clone)]
-pub(crate) struct AstLeaf<E, B: Basis> {
-    index: usize,
+pub(crate) struct AstLeaf<E, Id, B: Basis> {
+    id: Id,
     rotation: Rotation,
     _evaluator: PhantomData<(E, B)>,
 }
 
-impl<E, B: Basis> AstLeaf<E, B> {
+impl<E, Id: Copy, B: Basis> AstLeaf<E, Id, B> {
     /// Produces a new `AstLeaf` node corresponding to the underlying polynomial at a
     /// _new_ rotation. Existing rotations applied to this leaf node are ignored and the
     /// returned polynomial is not rotated _relative_ to the previous structure.
     pub(crate) fn with_rotation(&self, rotation: Rotation) -> Self {
         AstLeaf {
-            index: self.index,
+            id: self.id,
             rotation,
             _evaluator: PhantomData::default(),
         }
@@ -43,8 +45,8 @@ impl<E, B: Basis> AstLeaf<E, B> {
 /// - The references are then used to build up a [`Ast`] that represents the overall
 ///   operations to be applied to the polynomials.
 /// - Finally, we call [`Evaluator::evaluate`] passing in the [`Ast`].
-pub(crate) struct Evaluator<E, F: Field, B: Basis> {
-    polys: Vec<Polynomial<F, B>>,
+pub(crate) struct Evaluator<E, Id: Eq + Hash, F: Field, B: Basis> {
+    polys: HashMap<Id, Polynomial<F, B>>,
     _context: E,
 }
 
@@ -54,21 +56,47 @@ pub(crate) struct Evaluator<E, F: Field, B: Basis> {
 /// an evaluator will only be used to evaluate [`Ast`]s containing [`AstLeaf`]s obtained
 /// from itself. It should be set to the empty closure `|| {}`, because anonymous closures
 /// all have unique types.
-pub(crate) fn new_evaluator<E: Fn() + Clone, F: Field, B: Basis>(context: E) -> Evaluator<E, F, B> {
+pub(crate) fn new_evaluator<E: Fn() + Clone, Id: Eq + Hash, F: Field, B: Basis>(
+    context: E,
+) -> Evaluator<E, Id, F, B> {
     Evaluator {
-        polys: vec![],
+        polys: HashMap::default(),
         _context: context,
     }
 }
 
-impl<E, F: Field, B: Basis> Evaluator<E, F, B> {
+impl<E, F: Field, B: Basis> Evaluator<E, usize, F, B> {
     /// Registers the given polynomial for use in this evaluation context.
-    pub(crate) fn register_poly(&mut self, poly: Polynomial<F, B>) -> AstLeaf<E, B> {
-        let index = self.polys.len();
-        self.polys.push(poly);
+    ///
+    /// This API treats each registered polynomial as unique, even if the same polynomial
+    /// is added multiple times.
+    pub(crate) fn register_poly(&mut self, poly: Polynomial<F, B>) -> AstLeaf<E, usize, B> {
+        let id = self.polys.len();
+        self.polys.insert(id, poly);
 
         AstLeaf {
-            index,
+            id,
+            rotation: Rotation::cur(),
+            _evaluator: PhantomData::default(),
+        }
+    }
+}
+
+impl<E, Id: Copy + Eq + Hash, F: Field, B: Basis> Evaluator<E, Id, F, B> {
+    /// Registers the given polynomial for use in this evaluation context.
+    ///
+    /// This API registers the polynomial with the given identifier, as a cheaper way of
+    /// detecting duplicate polynomials than an equality check. The caller must ensure the
+    /// one-to-one mapping between identifiers and polynomials.
+    pub(crate) fn register_poly_as(
+        &mut self,
+        id: Id,
+        poly: &Polynomial<F, B>,
+    ) -> AstLeaf<E, Id, B> {
+        self.polys.entry(id).or_insert_with(|| poly.clone());
+
+        AstLeaf {
+            id,
             rotation: Rotation::cur(),
             _evaluator: PhantomData::default(),
         }
@@ -77,7 +105,7 @@ impl<E, F: Field, B: Basis> Evaluator<E, F, B> {
     /// Evaluates the given polynomial operation against this context.
     pub(crate) fn evaluate(
         &self,
-        ast: &Ast<E, F, B>,
+        ast: &Ast<E, Id, F, B>,
         domain: &EvaluationDomain<F>,
     ) -> Polynomial<F, B>
     where
@@ -85,9 +113,9 @@ impl<E, F: Field, B: Basis> Evaluator<E, F, B> {
         B: BasisOps,
     {
         match ast {
-            Ast::Poly(AstLeaf {
-                index, rotation, ..
-            }) => B::rotate(domain, &self.polys[*index], *rotation),
+            Ast::Poly(AstLeaf { id, rotation, .. }) => {
+                B::rotate(domain, self.polys.get(id).unwrap(), *rotation)
+            }
             Ast::Add(a, b) => {
                 let a = self.evaluate(a, domain);
                 let b = self.evaluate(b, domain);
@@ -114,15 +142,15 @@ impl<E, F: Field, B: Basis> Evaluator<E, F, B> {
 /// accidentally construct this case directly, because it can only be implemented for the
 /// [`ExtendedLagrangeCoeff`] basis.
 #[derive(Clone)]
-pub(crate) struct AstMul<E, F: Field, B: Basis>(Box<Ast<E, F, B>>, Box<Ast<E, F, B>>);
+pub(crate) struct AstMul<E, Id, F: Field, B: Basis>(Box<Ast<E, Id, F, B>>, Box<Ast<E, Id, F, B>>);
 
 /// A polynomial operation backed by an [`Evaluator`].
 #[derive(Clone)]
-pub(crate) enum Ast<E, F: Field, B: Basis> {
-    Poly(AstLeaf<E, B>),
-    Add(Box<Ast<E, F, B>>, Box<Ast<E, F, B>>),
-    Mul(AstMul<E, F, B>),
-    Scale(Box<Ast<E, F, B>>, F),
+pub(crate) enum Ast<E, Id, F: Field, B: Basis> {
+    Poly(AstLeaf<E, Id, B>),
+    Add(Box<Ast<E, Id, F, B>>, Box<Ast<E, Id, F, B>>),
+    Mul(AstMul<E, Id, F, B>),
+    Scale(Box<Ast<E, Id, F, B>>, F),
     /// The degree-1 term of a polynomial.
     ///
     /// The field element is the coeffient of the term in the standard basis, not the
@@ -134,104 +162,112 @@ pub(crate) enum Ast<E, F: Field, B: Basis> {
     ConstantTerm(F),
 }
 
-impl<E, F: Field, B: Basis> From<AstLeaf<E, B>> for Ast<E, F, B> {
-    fn from(leaf: AstLeaf<E, B>) -> Self {
+impl<E, Id, F: Field, B: Basis> From<AstLeaf<E, Id, B>> for Ast<E, Id, F, B> {
+    fn from(leaf: AstLeaf<E, Id, B>) -> Self {
         Ast::Poly(leaf)
     }
 }
 
-impl<E, F: Field, B: Basis> Neg for Ast<E, F, B> {
-    type Output = Ast<E, F, B>;
+impl<E, Id, F: Field, B: Basis> Neg for Ast<E, Id, F, B> {
+    type Output = Ast<E, Id, F, B>;
 
     fn neg(self) -> Self::Output {
         Ast::Scale(Box::new(self), -F::one())
     }
 }
 
-impl<E: Clone, F: Field, B: Basis> Neg for &Ast<E, F, B> {
-    type Output = Ast<E, F, B>;
+impl<E: Clone, Id: Clone, F: Field, B: Basis> Neg for &Ast<E, Id, F, B> {
+    type Output = Ast<E, Id, F, B>;
 
     fn neg(self) -> Self::Output {
         -(self.clone())
     }
 }
 
-impl<E, F: Field, B: Basis> Add<Ast<E, F, B>> for Ast<E, F, B> {
-    type Output = Ast<E, F, B>;
+impl<E, Id, F: Field, B: Basis> Add<Ast<E, Id, F, B>> for Ast<E, Id, F, B> {
+    type Output = Ast<E, Id, F, B>;
 
-    fn add(self, other: Ast<E, F, B>) -> Self::Output {
+    fn add(self, other: Ast<E, Id, F, B>) -> Self::Output {
         Ast::Add(Box::new(self), Box::new(other))
     }
 }
 
-impl<'a, E: Clone, F: Field, B: Basis> Add<&'a Ast<E, F, B>> for &'a Ast<E, F, B> {
-    type Output = Ast<E, F, B>;
+impl<'a, E: Clone, Id: Clone, F: Field, B: Basis> Add<&'a Ast<E, Id, F, B>>
+    for &'a Ast<E, Id, F, B>
+{
+    type Output = Ast<E, Id, F, B>;
 
-    fn add(self, other: &'a Ast<E, F, B>) -> Self::Output {
+    fn add(self, other: &'a Ast<E, Id, F, B>) -> Self::Output {
         self.clone() + other.clone()
     }
 }
 
-impl<E, F: Field, B: Basis> Sub<Ast<E, F, B>> for Ast<E, F, B> {
-    type Output = Ast<E, F, B>;
+impl<E, Id, F: Field, B: Basis> Sub<Ast<E, Id, F, B>> for Ast<E, Id, F, B> {
+    type Output = Ast<E, Id, F, B>;
 
-    fn sub(self, other: Ast<E, F, B>) -> Self::Output {
+    fn sub(self, other: Ast<E, Id, F, B>) -> Self::Output {
         self + (-other)
     }
 }
 
-impl<'a, E: Clone, F: Field, B: Basis> Sub<&'a Ast<E, F, B>> for &'a Ast<E, F, B> {
-    type Output = Ast<E, F, B>;
+impl<'a, E: Clone, Id: Clone, F: Field, B: Basis> Sub<&'a Ast<E, Id, F, B>>
+    for &'a Ast<E, Id, F, B>
+{
+    type Output = Ast<E, Id, F, B>;
 
-    fn sub(self, other: &'a Ast<E, F, B>) -> Self::Output {
+    fn sub(self, other: &'a Ast<E, Id, F, B>) -> Self::Output {
         self + &(-other)
     }
 }
 
-impl<E, F: Field> Mul<Ast<E, F, LagrangeCoeff>> for Ast<E, F, LagrangeCoeff> {
-    type Output = Ast<E, F, LagrangeCoeff>;
+impl<E, Id, F: Field> Mul<Ast<E, Id, F, LagrangeCoeff>> for Ast<E, Id, F, LagrangeCoeff> {
+    type Output = Ast<E, Id, F, LagrangeCoeff>;
 
-    fn mul(self, other: Ast<E, F, LagrangeCoeff>) -> Self::Output {
+    fn mul(self, other: Ast<E, Id, F, LagrangeCoeff>) -> Self::Output {
         Ast::Mul(AstMul(Box::new(self), Box::new(other)))
     }
 }
 
-impl<'a, E: Clone, F: Field> Mul<&'a Ast<E, F, LagrangeCoeff>> for &'a Ast<E, F, LagrangeCoeff> {
-    type Output = Ast<E, F, LagrangeCoeff>;
-
-    fn mul(self, other: &'a Ast<E, F, LagrangeCoeff>) -> Self::Output {
-        self.clone() * other.clone()
-    }
-}
-
-impl<E, F: Field> Mul<Ast<E, F, ExtendedLagrangeCoeff>> for Ast<E, F, ExtendedLagrangeCoeff> {
-    type Output = Ast<E, F, ExtendedLagrangeCoeff>;
-
-    fn mul(self, other: Ast<E, F, ExtendedLagrangeCoeff>) -> Self::Output {
-        Ast::Mul(AstMul(Box::new(self), Box::new(other)))
-    }
-}
-
-impl<'a, E: Clone, F: Field> Mul<&'a Ast<E, F, ExtendedLagrangeCoeff>>
-    for &'a Ast<E, F, ExtendedLagrangeCoeff>
+impl<'a, E: Clone, Id: Clone, F: Field> Mul<&'a Ast<E, Id, F, LagrangeCoeff>>
+    for &'a Ast<E, Id, F, LagrangeCoeff>
 {
-    type Output = Ast<E, F, ExtendedLagrangeCoeff>;
+    type Output = Ast<E, Id, F, LagrangeCoeff>;
 
-    fn mul(self, other: &'a Ast<E, F, ExtendedLagrangeCoeff>) -> Self::Output {
+    fn mul(self, other: &'a Ast<E, Id, F, LagrangeCoeff>) -> Self::Output {
         self.clone() * other.clone()
     }
 }
 
-impl<E, F: Field, B: Basis> Mul<F> for Ast<E, F, B> {
-    type Output = Ast<E, F, B>;
+impl<E, Id, F: Field> Mul<Ast<E, Id, F, ExtendedLagrangeCoeff>>
+    for Ast<E, Id, F, ExtendedLagrangeCoeff>
+{
+    type Output = Ast<E, Id, F, ExtendedLagrangeCoeff>;
+
+    fn mul(self, other: Ast<E, Id, F, ExtendedLagrangeCoeff>) -> Self::Output {
+        Ast::Mul(AstMul(Box::new(self), Box::new(other)))
+    }
+}
+
+impl<'a, E: Clone, Id: Clone, F: Field> Mul<&'a Ast<E, Id, F, ExtendedLagrangeCoeff>>
+    for &'a Ast<E, Id, F, ExtendedLagrangeCoeff>
+{
+    type Output = Ast<E, Id, F, ExtendedLagrangeCoeff>;
+
+    fn mul(self, other: &'a Ast<E, Id, F, ExtendedLagrangeCoeff>) -> Self::Output {
+        self.clone() * other.clone()
+    }
+}
+
+impl<E, Id, F: Field, B: Basis> Mul<F> for Ast<E, Id, F, B> {
+    type Output = Ast<E, Id, F, B>;
 
     fn mul(self, other: F) -> Self::Output {
         Ast::Scale(Box::new(self), other)
     }
 }
 
-impl<E: Clone, F: Field, B: Basis> Mul<F> for &Ast<E, F, B> {
-    type Output = Ast<E, F, B>;
+impl<E: Clone, Id: Clone, F: Field, B: Basis> Mul<F> for &Ast<E, Id, F, B> {
+    type Output = Ast<E, Id, F, B>;
 
     fn mul(self, other: F) -> Self::Output {
         Ast::Scale(Box::new(self.clone()), other)

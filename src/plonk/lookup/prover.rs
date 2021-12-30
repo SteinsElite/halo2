@@ -5,6 +5,7 @@ use super::super::{
 use super::Argument;
 use crate::{
     arithmetic::{eval_polynomial, parallelize, CurveAffine, FieldExt},
+    plonk::Any,
     poly::{
         self,
         commitment::{Blind, Params},
@@ -108,19 +109,28 @@ impl<F: FieldExt> Argument<F> {
                         &|_, _| panic!("virtual selectors are removed during optimization"),
                         &|evaluator, _, column_index, rotation| {
                             evaluator
-                                .register_poly(fixed_values[column_index].clone())
+                                .register_poly_as(
+                                    (Any::Fixed, column_index),
+                                    &fixed_values[column_index],
+                                )
                                 .with_rotation(rotation)
                                 .into()
                         },
                         &|evaluator, _, column_index, rotation| {
                             evaluator
-                                .register_poly(advice_values[column_index].clone())
+                                .register_poly_as(
+                                    (Any::Advice, column_index),
+                                    &advice_values[column_index],
+                                )
                                 .with_rotation(rotation)
                                 .into()
                         },
                         &|evaluator, _, column_index, rotation| {
                             evaluator
-                                .register_poly(instance_values[column_index].clone())
+                                .register_poly_as(
+                                    (Any::Instance, column_index),
+                                    &instance_values[column_index],
+                                )
                                 .with_rotation(rotation)
                                 .into()
                         },
@@ -141,19 +151,28 @@ impl<F: FieldExt> Argument<F> {
                         &|_, _| panic!("virtual selectors are removed during optimization"),
                         &|evaluator, _, column_index, rotation| {
                             evaluator
-                                .register_poly(fixed_cosets[column_index].clone())
+                                .register_poly_as(
+                                    (Any::Fixed, column_index),
+                                    &fixed_cosets[column_index],
+                                )
                                 .with_rotation(rotation)
                                 .into()
                         },
                         &|evaluator, _, column_index, rotation| {
                             evaluator
-                                .register_poly(advice_cosets[column_index].clone())
+                                .register_poly_as(
+                                    (Any::Advice, column_index),
+                                    &advice_cosets[column_index],
+                                )
                                 .with_rotation(rotation)
                                 .into()
                         },
                         &|evaluator, _, column_index, rotation| {
                             evaluator
-                                .register_poly(instance_cosets[column_index].clone())
+                                .register_poly_as(
+                                    (Any::Instance, column_index),
+                                    &instance_cosets[column_index],
+                                )
                                 .with_rotation(rotation)
                                 .into()
                         },
